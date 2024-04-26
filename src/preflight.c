@@ -26,8 +26,6 @@
 #include <unistd.h>
 #include <errno.h>
 
-#include <pthread.h>
-
 #include <sys/time.h>
 
 #ifdef HAVE_LIBIMOBILEDEVICE
@@ -35,6 +33,8 @@
 #include <libimobiledevice/lockdown.h>
 #include <libimobiledevice/notification_proxy.h>
 #endif
+
+#include <libimobiledevice-glue/thread.h>
 
 #include "preflight.h"
 #include "device.h"
@@ -59,6 +59,7 @@ struct idevice_private {
 	enum idevice_connection_type conn_type;
 	void *conn_data;
 	int version;
+	int device_class;
 };
 
 struct cb_data {
@@ -138,6 +139,7 @@ static void* preflight_worker_handle_device_add(void* userdata)
 	_dev->conn_type = CONNECTION_USBMUXD;
 	_dev->conn_data = NULL;
 	_dev->version = 0;
+	_dev->device_class = 0;
 
 	idevice_t dev = (idevice_t)_dev;
 
@@ -146,6 +148,7 @@ static void* preflight_worker_handle_device_add(void* userdata)
 
 	plist_t value = NULL;
 	char* version_str = NULL;
+	char* deviceclass_str = NULL;
 
 	usbmuxd_log(LL_INFO, "%s: Starting preflight on device %s...", __func__, _dev->udid);
 
@@ -211,23 +214,43 @@ retry:
 
 	lerr = lockdownd_get_value(lockdown, NULL, "ProductVersion", &value);
 	if (lerr != LOCKDOWN_E_SUCCESS) {
-		usbmuxd_log(LL_ERROR, "%s: ERROR: Could not get ProductVersion from device %s, lockdown error %d", __func__, _dev->udid, lerr);
+		usbmuxd_log(LL_WARNING, "%s: Could not get ProductVersion from device %s, lockdown error %d", __func__, _dev->udid, lerr);
+		/* assume old iOS version */
+		version_str = strdup("1.0");
+	} else {
+		if (value && plist_get_node_type(value) == PLIST_STRING) {
+			plist_get_string_val(value, &version_str);
+		}
+		plist_free(value);
+
+		if (!version_str) {
+			usbmuxd_log(LL_ERROR, "%s: Could not get ProductVersion string from device %s handle %d", __func__, _dev->udid, (int)(long)_dev->conn_data);
+			goto leave;
+		}
+	}
+
+	lerr = lockdownd_get_value(lockdown, NULL, "DeviceClass", &value);
+	if (lerr != LOCKDOWN_E_SUCCESS) {
+		usbmuxd_log(LL_ERROR, "%s: ERROR: Could not get DeviceClass from device %s, lockdown error %d", __func__, _dev->udid, lerr);
 		goto leave;
 	}
-
 	if (value && plist_get_node_type(value) == PLIST_STRING) {
-		plist_get_string_val(value, &version_str);
+		plist_get_string_val(value, &deviceclass_str);
 	}
+	plist_free(value);
 
-	if (!version_str) {
-		usbmuxd_log(LL_ERROR, "%s: Could not get ProductVersion string from device %s handle %d", __func__, _dev->udid, (int)(long)_dev->conn_data);
+	if (!deviceclass_str) {
+		usbmuxd_log(LL_ERROR, "%s: Could not get DeviceClass string from device %s handle %d", __func__, _dev->udid, (int)(long)_dev->conn_data);
 		goto leave;
 	}
 
 	int version_major = strtol(version_str, NULL, 10);
-	if (version_major >= 7) {
-		/* iOS 7.0 and later */
-		usbmuxd_log(LL_INFO, "%s: Found ProductVersion %s device %s", __func__, version_str, _dev->udid);
+	if (((!strcmp(deviceclass_str, "iPhone") || !strcmp(deviceclass_str, "iPad")) && version_major >= 7)
+	    || (!strcmp(deviceclass_str, "Watch") && version_major >= 2)
+	    || (!strcmp(deviceclass_str, "AppleTV") && version_major >= 9)
+	) {
+		/* iOS 7.0 / watchOS 2.0 / tvOS 9.0 and later */
+		usbmuxd_log(LL_INFO, "%s: Found %s %s device %s", __func__, deviceclass_str, version_str, _dev->udid);
 
 		lockdownd_set_untrusted_host_buid(lockdown);
 
@@ -334,10 +357,8 @@ retry:
 	}
 
 leave:
-	if (value)
-		plist_free(value);
-	if (version_str)
-		free(version_str);
+	free(deviceclass_str);
+	free(version_str);
 	if (lockdown)
 		lockdownd_client_free(lockdown);
 	if (dev)
@@ -369,18 +390,15 @@ void preflight_worker_device_add(struct device_info* info)
 		infocopy->serial = strdup(info->serial);
 	}
 
-	pthread_t th;
-	pthread_attr_t attr;
-
-	pthread_attr_init(&attr);
-	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-
-	int perr = pthread_create(&th, &attr, preflight_worker_handle_device_add, infocopy);
+	THREAD_T th;
+	int perr = thread_new(&th, preflight_worker_handle_device_add, infocopy);
 	if (perr != 0) {
 		free((char*)infocopy->serial);
 		free(infocopy);
 		usbmuxd_log(LL_ERROR, "ERROR: failed to start preflight worker thread for device %s: %s (%d). Invoking client_device_add() directly but things might not work as expected.", info->serial, strerror(perr), perr);
 		client_device_add(info);
+	} else {
+		thread_detach(th);
 	}
 #else
 	client_device_add(info);
