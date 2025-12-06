@@ -34,6 +34,7 @@
 #include <libgen.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <ctype.h>
 
 #include <libimobiledevice-glue/utils.h>
 #include <plist/plist.h>
@@ -425,12 +426,18 @@ int config_set_device_record(const char *udid, char* record_data, uint64_t recor
 	if (!udid || !record_data || record_size < 8)
 		return -EINVAL;
 
-	plist_t plist = NULL;
-	if (memcmp(record_data, "bplist00", 8) == 0) {
-		plist_from_bin(record_data, record_size, &plist);
-	} else {
-		plist_from_xml(record_data, record_size, &plist);
+	/* verify udid input */
+	const char* u = udid;
+	while (*u != '\0') {
+		if (!isalnum(*u) && (*u != '-')) {
+			usbmuxd_log(LL_ERROR, "ERROR: %s: udid contains invalid character.\n", __func__);
+			return -EINVAL;
+		}
+		u++;
 	}
+
+	plist_t plist = NULL;
+	plist_from_memory(record_data, record_size, &plist, NULL);
 
 	if (!plist || plist_get_node_type(plist) != PLIST_DICT) {
 		if (plist)
