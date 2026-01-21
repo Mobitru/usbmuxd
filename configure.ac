@@ -21,7 +21,7 @@ LT_INIT
 
 # Checks for libraries.
 PKG_CHECK_MODULES(libusb, libusb-1.0 >= 1.0.9)
-PKG_CHECK_MODULES(libplist, libplist-2.0 >= 2.3.0)
+PKG_CHECK_MODULES(libplist, libplist-2.0 >= 2.6.0)
 PKG_CHECK_MODULES(libimobiledevice, libimobiledevice-1.0 >= 1.3.0, have_limd=yes, have_limd=no)
 PKG_CHECK_MODULES(limd_glue, libimobiledevice-glue-1.0 >= 1.0.0)
 
@@ -40,7 +40,7 @@ if test "x$have_limd" = "xyes"; then
     AC_SUBST(libimobiledevice_CFLAGS)
     AC_SUBST(libimobiledevice_LIBS)
     CACHED_CFLAGS="$CFLAGS"
-    CFLAGS+=" $libimobiledevice_CFLAGS"
+    CFLAGS="$CFLAGS $libimobiledevice_CFLAGS"
     AC_CACHE_CHECK(for enum idevice_connection_type, ac_cv_enum_idevice_connection_type,
       AC_COMPILE_IFELSE([AC_LANG_PROGRAM([
         #include <libimobiledevice/libimobiledevice.h>
@@ -153,7 +153,7 @@ AM_CONDITIONAL(WIN32, test x$win32 = xtrue)
 AC_SUBST([UDEV_SUB])
 AC_SUBST([SYSTEMD_SUB])
 
-AS_COMPILER_FLAGS(GLOBAL_CFLAGS, "-g -Wall -Wextra -Wmissing-declarations -Wredundant-decls -Wshadow -Wpointer-arith  -Wwrite-strings -Wswitch-default -Wno-unused-parameter")
+AS_COMPILER_FLAGS(GLOBAL_CFLAGS, "-Wall -Wextra -Wmissing-declarations -Wredundant-decls -Wshadow -Wpointer-arith  -Wwrite-strings -Wswitch-default -Wno-unused-parameter")
 AC_SUBST(GLOBAL_CFLAGS)
 
 m4_ifdef([AM_SILENT_RULES],[AM_SILENT_RULES([yes])])

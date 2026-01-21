@@ -53,7 +53,7 @@
 #define NUM_RX_LOOPS 3
 
 struct usb_device {
-	libusb_device_handle *dev;
+	libusb_device_handle *handle;
 	uint8_t bus, address;
 	char serial[256];
 	int alive;
@@ -83,7 +83,7 @@ static int device_hotplug = 1;
 
 static void usb_disconnect(struct usb_device *dev)
 {
-	if(!dev->dev) {
+	if(!dev->handle) {
 		return;
 	}
 
@@ -114,9 +114,9 @@ static void usb_disconnect(struct usb_device *dev)
 
 	collection_free(&dev->tx_xfers);
 	collection_free(&dev->rx_xfers);
-	libusb_release_interface(dev->dev, dev->interface);
-	libusb_close(dev->dev);
-	dev->dev = NULL;
+	libusb_release_interface(dev->handle, dev->interface);
+	libusb_close(dev->handle);
+	dev->handle = NULL;
 	collection_remove(&device_list, dev);
 	free(dev);
 }
@@ -177,7 +177,7 @@ int usb_send(struct usb_device *dev, const unsigned char *buf, int length)
 {
 	int res;
 	struct libusb_transfer *xfer = libusb_alloc_transfer(0);
-	libusb_fill_bulk_transfer(xfer, dev->dev, dev->ep_out, (void*)buf, length, tx_callback, dev, 0);
+	libusb_fill_bulk_transfer(xfer, dev->handle, dev->ep_out, (void*)buf, length, tx_callback, dev, 0);
 	if((res = libusb_submit_transfer(xfer)) < 0) {
 		usbmuxd_log(LL_ERROR, "Failed to submit TX transfer %p len %d to device %d-%d: %s", buf, length, dev->bus, dev->address, libusb_error_name(res));
 		libusb_free_transfer(xfer);
@@ -189,7 +189,7 @@ int usb_send(struct usb_device *dev, const unsigned char *buf, int length)
 		// Send Zero Length Packet
 		xfer = libusb_alloc_transfer(0);
 		void *buffer = malloc(1);
-		libusb_fill_bulk_transfer(xfer, dev->dev, dev->ep_out, buffer, 0, tx_callback, dev, 0);
+		libusb_fill_bulk_transfer(xfer, dev->handle, dev->ep_out, buffer, 0, tx_callback, dev, 0);
 		if((res = libusb_submit_transfer(xfer)) < 0) {
 			usbmuxd_log(LL_ERROR, "Failed to submit TX ZLP transfer to device %d-%d: %s", dev->bus, dev->address, libusb_error_name(res));
 			libusb_free_transfer(xfer);
@@ -256,7 +256,7 @@ static int start_rx_loop(struct usb_device *dev)
 	void *buf;
 	struct libusb_transfer *xfer = libusb_alloc_transfer(0);
 	buf = malloc(USB_MRU);
-	libusb_fill_bulk_transfer(xfer, dev->dev, dev->ep_in, buf, USB_MRU, rx_callback, dev, 0);
+	libusb_fill_bulk_transfer(xfer, dev->handle, dev->ep_in, buf, USB_MRU, rx_callback, dev, 0);
 	if((res = libusb_submit_transfer(xfer)) != 0) {
 		usbmuxd_log(LL_ERROR, "Failed to submit RX transfer to device %d-%d: %s", dev->bus, dev->address, libusb_error_name(res));
 		libusb_free_transfer(xfer);
@@ -357,7 +357,7 @@ static void get_langid_callback(struct libusb_transfer *transfer)
 	libusb_fill_control_setup(transfer->buffer, LIBUSB_ENDPOINT_IN, LIBUSB_REQUEST_GET_DESCRIPTOR,
 			(uint16_t)((LIBUSB_DT_STRING << 8) | usbdev->devdesc.iSerialNumber),
 			langid, 1024 + LIBUSB_CONTROL_SETUP_SIZE);
-	libusb_fill_control_transfer(transfer, usbdev->dev, transfer->buffer, get_serial_callback, usbdev, 1000);
+	libusb_fill_control_transfer(transfer, usbdev->handle, transfer->buffer, get_serial_callback, usbdev, 1000);
 
 	if((res = libusb_submit_transfer(transfer)) < 0) {
 		usbmuxd_log(LL_ERROR, "Could not request transfer for device %d-%d: %s", usbdev->bus, usbdev->address, libusb_error_name(res));
@@ -394,7 +394,7 @@ static struct usb_device* find_device(int bus, int address)
 /// @param dev 
 /// @param usbdev 
 /// @param handle 
-/// @return 0 - undetermined, 1 - initial, 2 - valeria, 3 - cdc_ncm
+/// @return 0 - undetermined, 1 - initial, 2 - valeria, 3 - cdc_ncm, 4 - usbeth+cdc_ncm, 5 - cdc_ncm direct
 static int guess_mode(struct libusb_device* dev, struct usb_device *usbdev)
 {
 	int res, j;
@@ -404,11 +404,21 @@ static int guess_mode(struct libusb_device* dev, struct usb_device *usbdev)
 	int bus = usbdev->bus;
 	int address = usbdev->address;
 
+	if(devdesc.bNumConfigurations == 1) {
+		// CDC-NCM Direct
+		return 5;
+	}
+
 	if(devdesc.bNumConfigurations <= 4) {
 		// Assume this is initial mode
 		return 1;
 	}
-    
+
+	if(devdesc.bNumConfigurations == 6) {
+		// USB Ethernet + CDC-NCM
+		return 4;
+	}
+
 	if(devdesc.bNumConfigurations != 5) {
 		// No known modes with more then 5 configurations
 		return 0;
@@ -595,7 +605,7 @@ static void device_complete_initialization(struct mode_context *context, struct 
 	usbdev->address = address;
 	usbdev->devdesc = devdesc;
 	usbdev->speed = 480000000;
-	usbdev->dev = handle;
+	usbdev->handle = handle;
 	usbdev->alive = 1;
 	usbdev->wMaxPacketSize = libusb_get_max_packet_size(dev, usbdev->ep_out);
 	if (usbdev->wMaxPacketSize <= 0) {
@@ -614,6 +624,9 @@ static void device_complete_initialization(struct mode_context *context, struct 
 			break;
 		case LIBUSB_SPEED_SUPER:
 			usbdev->speed = 5000000000;
+			break;
+		case LIBUSB_SPEED_SUPER_PLUS:
+			usbdev->speed = 10000000000;
 			break;
 		case LIBUSB_SPEED_HIGH:
 		case LIBUSB_SPEED_UNKNOWN:
@@ -691,12 +704,12 @@ static void get_mode_cb(struct libusb_transfer* transfer)
 	unsigned char *data = libusb_control_transfer_get_data(transfer);
 
 	char* desired_mode_char = getenv(ENV_DEVICE_MODE);
-	int desired_mode = desired_mode_char ? atoi(desired_mode_char) : 3;
+	int desired_mode = desired_mode_char ? atoi(desired_mode_char) : 1;
 	int guessed_mode = guess_mode(context->dev, dev);
 
 	// Response is 3:3:3:0 for initial mode, 5:3:3:0 otherwise.
 	usbmuxd_log(LL_INFO, "Received response %i:%i:%i:%i for get_mode request for device %i-%i", data[0], data[1], data[2], data[3], context->bus, context->address);
-	if(desired_mode >= 1 && desired_mode <= 3 && 
+	if(desired_mode >= 1 && desired_mode <= 5 &&
 	   guessed_mode > 0 && // do not switch mode if guess failed
 	   guessed_mode != desired_mode) {
 		usbmuxd_log(LL_WARNING, "Switching device %i-%i mode to %i", context->bus, context->address, desired_mode);
@@ -764,7 +777,7 @@ static int usb_device_add(libusb_device* dev)
 	usbdev->address = address;
 	usbdev->devdesc = devdesc;
 	usbdev->speed = 0;
-	usbdev->dev = handle;
+	usbdev->handle = handle;
 	usbdev->alive = 1;
 
 	collection_init(&usbdev->tx_xfers);
@@ -854,7 +867,7 @@ int usb_discover(void)
 
 const char *usb_get_serial(struct usb_device *dev)
 {
-	if(!dev->dev) {
+	if(!dev->handle) {
 		return NULL;
 	}
 	return dev->serial;
@@ -862,7 +875,7 @@ const char *usb_get_serial(struct usb_device *dev)
 
 uint32_t usb_get_location(struct usb_device *dev)
 {
-	if(!dev->dev) {
+	if(!dev->handle) {
 		return 0;
 	}
 	return (dev->bus << 16) | dev->address;
@@ -870,7 +883,7 @@ uint32_t usb_get_location(struct usb_device *dev)
 
 uint16_t usb_get_pid(struct usb_device *dev)
 {
-	if(!dev->dev) {
+	if(!dev->handle) {
 		return 0;
 	}
 	return dev->devdesc.idProduct;
@@ -878,7 +891,7 @@ uint16_t usb_get_pid(struct usb_device *dev)
 
 uint64_t usb_get_speed(struct usb_device *dev)
 {
-	if (!dev->dev) {
+	if (!dev->handle) {
 		return 0;
 	}
 	return dev->speed;
